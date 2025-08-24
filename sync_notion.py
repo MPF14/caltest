@@ -57,7 +57,7 @@ def create_notion_event(event, accurate_event):
         parent={"database_id": DATABASE_ID},
         properties={
             "Assignment Title": {"title": [{"text": {"content": title}}]},
-            "Class": {"rich_text": [{"text": {"content": class_name}}]},
+            "Class": {"select": {"name": class_name}},
             "Start Time": {"date": {"start": start_time}},
             "End Time": {"date": {"start": end_time}},
             "Description": {"rich_text": [{"text": {"content": description}}]},
