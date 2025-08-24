@@ -1,0 +1,5 @@
+requests
+ics
+notion-client
+python-dateutil
+python-dotenv
