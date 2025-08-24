@@ -16,8 +16,12 @@ CAL_A_URL = os.getenv("CALENDAR_A_URL").replace("webcal://", "https://")
 CAL_B_URL = os.getenv("CALENDAR_B_URL").replace("webcal://", "https://")
 
 def fetch_calendar(url):
-    data = requests.get(url).text
-    return Calendar(data)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()  # will raise a clear error if Google blocks the request
+    return Calendar(response.text)
 
 def events_by_day(calendar):
     by_day = {}
