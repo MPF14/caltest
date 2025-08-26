@@ -46,8 +46,8 @@ def find_matching_event(target_event, same_day_events):
     return None
 
 def create_notion_event(event, accurate_event):
-    if len(description_text) > 2000:
-        description_text = description_text[:2000]
+    if len(description) > 2000:
+        description = description[:2000]
     start_time = accurate_event.begin.isoformat()
     end_time = accurate_event.end.isoformat() if accurate_event.end else None
 
