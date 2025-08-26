@@ -46,15 +46,15 @@ def find_matching_event(target_event, same_day_events):
     return None
 
 def create_notion_event(event, accurate_event):
-    if len(description) > 2000:
-        description = description[:2000]
+    
     start_time = accurate_event.begin.isoformat()
     end_time = accurate_event.end.isoformat() if accurate_event.end else None
 
     title = event.name
     class_name = title.split(":")[0] if ":" in title else "Unknown"
     description = event.description or ""
-
+    if len(description) > 2000:
+        description = description[:2000]
     notion.pages.create(
         parent={"database_id": DATABASE_ID},
         properties={
