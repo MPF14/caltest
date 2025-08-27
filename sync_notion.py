@@ -22,6 +22,18 @@ def fetch_calendar(url):
     response = requests.get(url, headers=headers)
     response.raise_for_status()  # will raise a clear error if Google blocks the request
     return Calendar(response.text)
+    
+def find_existing_page(event_id):
+    results = notion.databases.query(
+        **{
+            "database_id": DATABASE_ID,
+            "filter": {
+                "property": "Event ID",
+                "rich_text": {"equals": event_id}
+            },
+        }
+    )
+    return results["results"][0] if results["results"] else None
 
 def events_by_day(calendar):
     by_day = {}
@@ -45,53 +57,167 @@ def find_matching_event(target_event, same_day_events):
             return e
     return None
 
-def create_notion_event(event, accurate_event):
+SYNC_MARKER = "[SYNCED DESCRIPTION]"
+SYNC_CHILD_MARKER = "[SYNCED CONTENT]"
+
+def upsert_notion_event(event, accurate_event):
     start_time = accurate_event.begin.isoformat()
     end_time = accurate_event.end.isoformat() if accurate_event.end else None
 
     title = event.name
     class_name = title.split(":")[0] if ":" in title else "Unknown"
     description = event.description or ""
+    event_id = event.uid
 
-    # Create the page in the database
-    new_page = notion.pages.create(
-        parent={"database_id": DATABASE_ID},
-        properties={
-            "Assignment Title": {"title": [{"text": {"content": title}}]},
-            "Class": {"select": {"name": class_name}},
-            "Start Time": {"date": {"start": start_time}},
-            "End Time": {"date": {"start": end_time}},
-            "Description": {
-                "rich_text": [
-                    {
-                        "text": {
-                            "content": "See full description inside page →"
-                        }
-                    }
-                ]
+    # Check if page already exists
+    existing_page = find_existing_page(event_id)
+
+    if existing_page:
+        page_id = existing_page["id"]
+
+        # ✅ Update properties
+        notion.pages.update(
+            page_id=page_id,
+            properties={
+                "Assignment Title": {"title": [{"text": {"content": title}}]},
+                "Class": {"select": {"name": class_name}},
+                "Start Time": {"date": {"start": start_time}},
+                "End Time": {"date": {"start": end_time}},
+                "Description": {
+                    "rich_text": [
+                        {"text": {"content": "See full description inside page →"}}
+                    ]
+                },
             },
-        }
-    )
-
-    # Append the full description as a block inside the page
-    if description:
-        notion.blocks.children.append(
-            new_page["id"],
-            children=[
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [
-                            {
-                                "type": "text",
-                                "text": {"content": description}
-                            }
-                        ]
-                    },
-                }
-            ],
         )
+
+        # ✅ Find existing synced toggle
+        toggle_block = None
+        children = notion.blocks.children.list(page_id).get("results", [])
+        for block in children:
+            if block["type"] == "toggle":
+                texts = block[block["type"]]["rich_text"]
+                if texts and SYNC_MARKER in texts[0]["plain_text"]:
+                    toggle_block = block
+                    break
+
+        if toggle_block:
+            toggle_id = toggle_block["id"]
+
+            # ✅ Get children of toggle
+            toggle_children = notion.blocks.children.list(toggle_id).get("results", [])
+
+            # Find marker child
+            marker_child = None
+            for child in toggle_children:
+                if child["type"] == "paragraph":
+                    texts = child[child["type"]]["rich_text"]
+                    if texts and SYNC_CHILD_MARKER in texts[0]["plain_text"]:
+                        marker_child = child
+                        break
+
+            # If marker exists, delete everything after it
+            if marker_child:
+                found_marker = False
+                for child in toggle_children:
+                    if child["id"] == marker_child["id"]:
+                        found_marker = True
+                        continue
+                    if found_marker:
+                        notion.blocks.delete(child["id"])
+            else:
+                # If no marker, insert one at the top
+                notion.blocks.children.append(
+                    toggle_id,
+                    children=[{
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [
+                                {"type": "text", "text": {"content": SYNC_CHILD_MARKER}}
+                            ]
+                        },
+                    }]
+                )
+
+                # Refresh child list
+                toggle_children = notion.blocks.children.list(toggle_id).get("results", [])
+
+            # ✅ Insert new description lines *after marker*
+            if description:
+                lines = description.splitlines()
+                new_blocks = []
+                for line in lines:
+                    if line.strip():
+                        new_blocks.append({
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {
+                                "rich_text": [{"type": "text", "text": {"content": line}}]
+                            },
+                        })
+                    else:
+                        new_blocks.append({
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {"rich_text": []},
+                        })
+
+                notion.blocks.children.append(toggle_id, children=new_blocks)
+
+        else:
+            # ✅ If no toggle, create fresh
+            toggle_block = {
+                "object": "block",
+                "type": "toggle",
+                "toggle": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": "Synced Description"}},
+                        {
+                            "type": "text",
+                            "text": {"content": SYNC_MARKER},
+                            "annotations": {"color": "gray"},
+                        },
+                    ],
+                    "children": [
+                        {
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {
+                                "rich_text": [
+                                    {"type": "text", "text": {"content": SYNC_CHILD_MARKER}}
+                                ]
+                            },
+                        }
+                    ],
+                },
+            }
+
+            notion.blocks.children.append(page_id, children=[toggle_block])
+
+            # Then append lines
+            if description:
+                lines = description.splitlines()
+                new_blocks = []
+                for line in lines:
+                    if line.strip():
+                        new_blocks.append({
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {
+                                "rich_text": [{"type": "text", "text": {"content": line}}]
+                            },
+                        })
+                    else:
+                        new_blocks.append({
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {"rich_text": []},
+                        })
+
+                # append into the toggle we just created
+                toggle_id = notion.blocks.children.list(page_id)["results"][-1]["id"]
+                notion.blocks.children.append(toggle_id, children=new_blocks)
 
 def main():
     print("Fetching calendars...")
