@@ -24,7 +24,6 @@ def fetch_calendar(url):
     return Calendar(response.text)
 
 def find_existing_page(event_id, title):
-    # Try Event ID first
     if event_id:
         try:
             res = notion.databases.query(
@@ -35,8 +34,6 @@ def find_existing_page(event_id, title):
                 return res["results"][0]
         except Exception as e:
             print(f"Warning: Event ID query failed: {e}")
-
-    # Fallback to title (retrofit old pages)
     try:
         res = notion.databases.query(
             database_id=DATABASE_ID,
@@ -44,8 +41,7 @@ def find_existing_page(event_id, title):
         )
         if res["results"]:
             page = res["results"][0]
-            # If Event ID missing, retroactively assign
-            if not page["properties"].get("Event ID", {}).get("rich_text"):
+            if not page["properties"].get("Event ID", {}).get("rich_text") and event_id:
                 notion.pages.update(
                     page_id=page["id"],
                     properties={"Event ID": {"rich_text": [{"text": {"content": event_id}}]}}
@@ -53,7 +49,6 @@ def find_existing_page(event_id, title):
             return page
     except Exception as e:
         print(f"Warning: Title query failed: {e}")
-
     return None
 
 def events_by_day(calendar):
@@ -71,8 +66,6 @@ def find_matching_event(target_event, same_day_events):
 
 def update_page_body(page_id, full_description):
     children = notion.blocks.children.list(page_id).get("results", [])
-
-    # Find the [SYNCED CONTENT] marker
     marker_id = None
     for block in children:
         if block["type"] == "paragraph":
@@ -80,8 +73,6 @@ def update_page_body(page_id, full_description):
             if texts and SYNC_CHILD_MARKER in texts[0]["plain_text"]:
                 marker_id = block["id"]
                 break
-
-    # Create marker if it doesn't exist
     if not marker_id:
         res = notion.blocks.children.append(
             page_id,
@@ -94,7 +85,6 @@ def update_page_body(page_id, full_description):
         marker_id = res["results"][0]["id"]
         children = notion.blocks.children.list(page_id).get("results", [])
 
-    # Collect existing synced lines after the marker
     seen = False
     existing_lines = set()
     for block in children:
@@ -106,7 +96,6 @@ def update_page_body(page_id, full_description):
             if texts:
                 existing_lines.add(texts[0]["text"]["content"])
 
-    # Append only new lines and split lines > MAX_LENGTH
     new_blocks = []
     for line in full_description.splitlines():
         line = line.strip()
@@ -126,7 +115,6 @@ def update_page_body(page_id, full_description):
                 "type": "paragraph",
                 "paragraph": {"rich_text": [{"type": "text", "text": {"content": line}}]}
             })
-
     if new_blocks:
         notion.blocks.children.append(marker_id, children=new_blocks)
 
@@ -135,11 +123,9 @@ def upsert_notion_event(event, accurate_event):
     title = event.name or "Untitled Event"
     class_name = title.split(":")[0] if ":" in title else "Unknown"
     description = event.description or ""
-
     start_time = accurate_event.begin.isoformat()
     end_time = accurate_event.end.isoformat() if accurate_event.end else None
 
-    # Description field is just a placeholder now
     props = {
         "Assignment Title": {"title": [{"text": {"content": title}}]},
         "Class": {"select": {"name": class_name}},
@@ -160,8 +146,6 @@ def upsert_notion_event(event, accurate_event):
         print(f"Creating: {title}")
         new_page = notion.pages.create(parent={"database_id": DATABASE_ID}, properties=props)
         page_id = new_page["id"]
-
-        # Add synced toggle with marker + initial description
         toggle = {
             "object": "block",
             "type": "toggle",
@@ -180,7 +164,7 @@ def upsert_notion_event(event, accurate_event):
             },
         }
         res = notion.blocks.children.append(page_id, children=[toggle])
-        toggle_id = res["results"][0]["id']
+        toggle_id = res["results"][0]["id"]
         update_page_body(toggle_id, description)
 
 def main():
@@ -196,7 +180,6 @@ def main():
         if day not in events_a_by_day:
             continue
         accurate_events = events_a_by_day[day]
-
         for b_event in events:
             match = find_matching_event(b_event, accurate_events)
             if not match:
