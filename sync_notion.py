@@ -46,25 +46,52 @@ def find_matching_event(target_event, same_day_events):
     return None
 
 def create_notion_event(event, accurate_event):
-    
     start_time = accurate_event.begin.isoformat()
     end_time = accurate_event.end.isoformat() if accurate_event.end else None
 
     title = event.name
     class_name = title.split(":")[0] if ":" in title else "Unknown"
     description = event.description or ""
-    if len(description) > 2000:
-        description = description[:2000]
-    notion.pages.create(
+
+    # Create the page in the database
+    new_page = notion.pages.create(
         parent={"database_id": DATABASE_ID},
         properties={
             "Assignment Title": {"title": [{"text": {"content": title}}]},
             "Class": {"select": {"name": class_name}},
             "Start Time": {"date": {"start": start_time}},
             "End Time": {"date": {"start": end_time}},
-            "Description": {"rich_text": [{"text": {"content": description}}]},
+            "Description": {
+                "rich_text": [
+                    {
+                        "text": {
+                            "content": "See full description inside page →"
+                        }
+                    }
+                ]
+            },
         }
     )
+
+    # Append the full description as a block inside the page
+    if description:
+        notion.blocks.children.append(
+            new_page["id"],
+            children=[
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [
+                            {
+                                "type": "text",
+                                "text": {"content": description}
+                            }
+                        ]
+                    },
+                }
+            ],
+        )
 
 def main():
     print("Fetching calendars...")
