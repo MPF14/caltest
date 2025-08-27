@@ -24,40 +24,28 @@ def fetch_calendar(url):
     return Calendar(response.text)
     
 def find_existing_page(event_id, title):
-    """
-    Try to find a Notion page by Event ID first.
-    If none found, fall back to title (useful for old pages without Event ID).
-    """
-    # --- Try Event ID first ---
+    # Try Event ID first
     if event_id:
         try:
-            results = notion.databases.query(
+            res = notion.databases.query(
                 database_id=DATABASE_ID,
-                filter={
-                    "property": "Event ID",
-                    "rich_text": {"equals": event_id}
-                }
-            )["results"]
-
-            if results:
-                return results[0]
+                filter={"property": "Event ID", "rich_text": {"equals": event_id}},
+            )
+            if res["results"]:
+                return res["results"][0]
         except Exception as e:
-            print(f"Warning: Could not query by Event ID: {e}")
+            print(f"Warn: query by Event ID failed: {e}")
 
-    # --- Fallback: try Title (retrofit Event ID on update) ---
+    # Fallback to Assignment Title (for retrofitting legacy rows)
     try:
-        results = notion.databases.query(
+        res = notion.databases.query(
             database_id=DATABASE_ID,
-            filter={
-                "property": "Assignment Title",
-                "title": {"equals": title}
-            }
-        )["results"]
-
-        if results:
-            return results[0]
+            filter={"property": "Assignment Title", "title": {"equals": title}},
+        )
+        if res["results"]:
+            return res["results"][0]
     except Exception as e:
-        print(f"Warning: Could not query by Title: {e}")
+        print(f"Warn: query by title failed: {e}")
 
     return None
 
@@ -87,43 +75,144 @@ SYNC_MARKER = "[SYNCED DESCRIPTION]"
 SYNC_CHILD_MARKER = "[SYNCED CONTENT]"
 
 def upsert_notion_event(event, accurate_event):
-    event_id = event.uid  # or however you're generating unique IDs
-    title = event.name
+    event_id = getattr(event, "uid", None) or ""  # make sure it's a string
+    title = event.name or "Untitled Event"
     class_name = title.split(":")[0] if ":" in title else "Unknown"
-    description = event.description or ""
-
-    # Truncate if too long
-    if len(description) > 2000:
-        description = description[:2000]
+    full_description = event.description or ""
 
     start_time = accurate_event.begin.isoformat()
     end_time = accurate_event.end.isoformat() if accurate_event.end else None
 
-    properties = {
+    # Properties: keep Description short (pointer), always set Event ID
+    props = {
         "Assignment Title": {"title": [{"text": {"content": title}}]},
         "Class": {"select": {"name": class_name}},
         "Start Time": {"date": {"start": start_time}},
         "End Time": {"date": {"start": end_time}},
-        "Description": {"rich_text": [{"text": {"content": description}}]},
-        "Event ID": {"rich_text": [{"text": {"content": event_id}}]},  # Always set
+        "Description": {"rich_text": [{"text": {"content": "See full description inside page →"}}]},
+        "Event ID": {"rich_text": [{"text": {"content": event_id}}]},
     }
 
-    existing_page = find_existing_page(event_id, title)
+    page = find_existing_page(event_id, title)
 
-    if existing_page:
-        # Update existing page
-        print(f"Updating event: {title}")
-        notion.pages.update(
-            page_id=existing_page["id"],
-            properties=properties
-        )
+    if page:
+        page_id = page["id"]
+        print(f"Updating: {title}")
+
+        # Update properties (including Event ID retrofit)
+        notion.pages.update(page_id=page_id, properties=props)
+
+        # Find existing synced toggle (by marker in toggle title rich_text[0])
+        toggle_id = None
+        children = notion.blocks.children.list(page_id).get("results", [])
+        for block in children:
+            if block["type"] == "toggle":
+                texts = block["toggle"]["rich_text"]
+                if texts and SYNC_MARKER in texts[-1]["plain_text"]:
+                    toggle_id = block["id"]
+                    break
+
+        # If no toggle, create it
+        if not toggle_id:
+            new_toggle = {
+                "object": "block",
+                "type": "toggle",
+                "toggle": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": "Synced Description"}},
+                        {"type": "text", "text": {"content": SYNC_MARKER}, "annotations": {"color": "gray"}},
+                    ],
+                    "children": [],
+                },
+            }
+            res = notion.blocks.children.append(page_id, children=[new_toggle])
+            toggle_id = res["results"][0]["id"]
+
+        # Ensure marker child exists; then wipe only content after it
+        toggle_children = notion.blocks.children.list(toggle_id).get("results", [])
+        marker_child = None
+        for child in toggle_children:
+            if child["type"] == "paragraph":
+                texts = child["paragraph"]["rich_text"]
+                if texts and SYNC_CHILD_MARKER in texts[0]["plain_text"]:
+                    marker_child = child
+                    break
+
+        if not marker_child:
+            # create marker at top
+            notion.blocks.children.append(
+                toggle_id,
+                children=[{
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": SYNC_CHILD_MARKER}}]},
+                }],
+            )
+            toggle_children = notion.blocks.children.list(toggle_id).get("results", [])
+
+        # Delete everything AFTER the marker
+        seen = False
+        for child in toggle_children:
+            if not seen and child["type"] == "paragraph":
+                texts = child["paragraph"]["rich_text"]
+                if texts and SYNC_CHILD_MARKER in texts[0]["plain_text"]:
+                    seen = True
+                    continue
+            elif seen:
+                notion.blocks.delete(child["id"])
+
+        # Append the fresh description as lines after the marker
+        if full_description is not None:
+            lines = full_description.splitlines()
+            new_blocks = [
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": ln}}]} if ln.strip() else {"rich_text": []},
+                }
+                for ln in lines
+            ]
+            if new_blocks:
+                notion.blocks.children.append(toggle_id, children=new_blocks)
+
     else:
-        # Create new page
-        print(f"Creating new event: {title}")
-        notion.pages.create(
-            parent={"database_id": DATABASE_ID},
-            properties=properties
-        )
+        print(f"Creating: {title}")
+        # Create the page
+        new_page = notion.pages.create(parent={"database_id": DATABASE_ID}, properties=props)
+        page_id = new_page["id"]
+
+        # Create the synced toggle with marker + description lines
+        lines = (full_description or "").splitlines()
+        toggle = {
+            "object": "block",
+            "type": "toggle",
+            "toggle": {
+                "rich_text": [
+                    {"type": "text", "text": {"content": "Synced Description"}},
+                    {"type": "text", "text": {"content": SYNC_MARKER}, "annotations": {"color": "gray"}},
+                ],
+                "children": [
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {"rich_text": [{"type": "text", "text": {"content": SYNC_CHILD_MARKER}}]},
+                    }
+                ],
+            },
+        }
+        res = notion.blocks.children.append(page_id, children=[toggle])
+        toggle_id = res["results"][0]["id"]
+
+        if lines:
+            new_blocks = [
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": ln}}]} if ln.strip() else {"rich_text": []},
+                }
+                for ln in lines
+            ]
+            notion.blocks.children.append(toggle_id, children=new_blocks)
 
 def main():
     print("Fetching calendars...")
@@ -132,7 +221,6 @@ def main():
 
     events_a_by_day = events_by_day(cal_a)
     events_b_by_day = events_by_day(cal_b)
-    existing_titles = get_existing_titles()
 
     print("Syncing events...")
 
@@ -140,22 +228,14 @@ def main():
         if day not in events_a_by_day:
             continue
         accurate_events = events_a_by_day[day]
+
         for b_event in events:
-            title = b_event.name
             match = find_matching_event(b_event, accurate_events)
+            if not match:
+                print(f"No match for: {b_event.name}")
+                continue
 
-        if not match:
-            print(f"No match for: {title}")
-            continue
-
-        # 🔑 Always call upsert so old ones get updated too
-        upsert_notion_event(b_event, match)
-
-        # Check if it's new or update
-        if title in existing_titles:
-            print(f"Updated: {title}")
-        else:
-            print(f"Created: {title}")
+            upsert_notion_event(b_event, match)
         
 if __name__ == "__main__":
     main()
