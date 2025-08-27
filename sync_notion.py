@@ -64,6 +64,9 @@ def find_matching_event(target_event, same_day_events):
             return e
     return None
 
+def normalize_line(line):
+    return " ".join(line.strip().split())
+
 def update_page_body(page_id, full_description):
     children = notion.blocks.children.list(page_id).get("results", [])
     marker_id = None
@@ -85,6 +88,7 @@ def update_page_body(page_id, full_description):
         marker_id = res["results"][0]["id"]
         children = notion.blocks.children.list(page_id).get("results", [])
 
+    # Collect existing synced lines after the marker
     seen = False
     existing_lines = set()
     for block in children:
@@ -94,12 +98,13 @@ def update_page_body(page_id, full_description):
         if seen and block["type"] == "paragraph":
             texts = block["paragraph"]["rich_text"]
             if texts:
-                existing_lines.add(texts[0]["text"]["content"])
+                existing_lines.add(normalize_line(texts[0]["text"]["content"]))
 
+    # Append only new lines and split lines > MAX_LENGTH
     new_blocks = []
     for line in full_description.splitlines():
-        line = line.strip()
-        if not line or line in existing_lines:
+        norm_line = normalize_line(line)
+        if not norm_line or norm_line in existing_lines:
             continue
         while len(line) > MAX_LENGTH:
             part = line[:MAX_LENGTH]
@@ -115,8 +120,10 @@ def update_page_body(page_id, full_description):
                 "type": "paragraph",
                 "paragraph": {"rich_text": [{"type": "text", "text": {"content": line}}]}
             })
+
     if new_blocks:
         notion.blocks.children.append(marker_id, children=new_blocks)
+
 
 def upsert_notion_event(event, accurate_event):
     event_id = getattr(event, "uid", None) or ""
