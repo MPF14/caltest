@@ -68,7 +68,13 @@ def normalize_line(line):
     return " ".join(line.strip().split())
 
 def update_page_body(page_id, full_description):
+    """
+    Replace everything under [SYNCED CONTENT] with the current description.
+    Manual edits above the marker are preserved.
+    """
     children = notion.blocks.children.list(page_id).get("results", [])
+
+    # Find marker
     marker_id = None
     for block in children:
         if block["type"] == "paragraph":
@@ -76,6 +82,8 @@ def update_page_body(page_id, full_description):
             if texts and SYNC_CHILD_MARKER in texts[0]["plain_text"]:
                 marker_id = block["id"]
                 break
+
+    # Create marker if it doesn't exist
     if not marker_id:
         res = notion.blocks.children.append(
             page_id,
@@ -86,43 +94,43 @@ def update_page_body(page_id, full_description):
             }]
         )
         marker_id = res["results"][0]["id"]
-        children = notion.blocks.children.list(page_id).get("results", [])
 
-    # Collect existing synced lines after the marker
+    # Delete everything after marker
     seen = False
-    existing_lines = set()
     for block in children:
         if block["id"] == marker_id:
             seen = True
             continue
-        if seen and block["type"] == "paragraph":
-            texts = block["paragraph"]["rich_text"]
-            if texts:
-                existing_lines.add(normalize_line(texts[0]["text"]["content"]))
+        if seen:
+            notion.blocks.delete(block["id"])
 
-    # Append only new lines and split lines > MAX_LENGTH
-    new_blocks = []
-    for line in full_description.splitlines():
-        norm_line = normalize_line(line)
-        if not norm_line or norm_line in existing_lines:
-            continue
-        while len(line) > MAX_LENGTH:
-            part = line[:MAX_LENGTH]
-            new_blocks.append({
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": [{"type": "text", "text": {"content": part}}]}
-            })
-            line = line[MAX_LENGTH:]
-        if line:
-            new_blocks.append({
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": [{"type": "text", "text": {"content": line}}]}
-            })
-
-    if new_blocks:
-        notion.blocks.children.append(marker_id, children=new_blocks)
+    # Append current description under marker
+    if full_description:
+        lines = full_description.splitlines()
+        new_blocks = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                # empty line
+                new_blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": []}})
+            else:
+                # split long lines
+                while len(line) > MAX_LENGTH:
+                    part = line[:MAX_LENGTH]
+                    new_blocks.append({
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {"rich_text": [{"type": "text", "text": {"content": part}}]}
+                    })
+                    line = line[MAX_LENGTH:]
+                if line:
+                    new_blocks.append({
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {"rich_text": [{"type": "text", "text": {"content": line}}]}
+                    })
+        if new_blocks:
+            notion.blocks.children.append(marker_id, children=new_blocks)
 
 
 def upsert_notion_event(event, accurate_event):
