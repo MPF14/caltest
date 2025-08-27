@@ -235,16 +235,21 @@ def main():
             continue
         accurate_events = events_a_by_day[day]
         for b_event in events:
-            title = b_event.name
-            if title in existing_titles:
-                continue
+    title = b_event.name
+    match = find_matching_event(b_event, accurate_events)
 
-            match = find_matching_event(b_event, accurate_events)
-            if match:
-                upsert_notion_event(b_event, match)
-                print(f"Created: {title}")
-            else:
-                print(f"No match for: {title}")
+    if not match:
+        print(f"No match for: {title}")
+        continue
 
+    # 🔑 Always call upsert so old ones get updated too
+    upsert_notion_event(b_event, match)
+
+    # Check if it's new or update
+    if title in existing_titles:
+        print(f"Updated: {title}")
+    else:
+        print(f"Created: {title}")
+        
 if __name__ == "__main__":
     main()
