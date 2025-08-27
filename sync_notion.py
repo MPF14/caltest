@@ -241,7 +241,7 @@ def main():
 
             match = find_matching_event(b_event, accurate_events)
             if match:
-                create_notion_event(b_event, match)
+                upsert_notion_event(b_event, match)
                 print(f"Created: {title}")
             else:
                 print(f"No match for: {title}")
