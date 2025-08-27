@@ -15,6 +15,7 @@ CAL_B_URL = os.getenv("CALENDAR_B_URL").replace("webcal://", "https://")
 
 SYNC_MARKER = "[SYNCED DESCRIPTION]"
 SYNC_CHILD_MARKER = "[SYNCED CONTENT]"
+MAX_LENGTH = 2000  # Notion paragraph limit
 
 def fetch_calendar(url):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -71,6 +72,7 @@ def find_matching_event(target_event, same_day_events):
 def update_page_body(page_id, full_description):
     children = notion.blocks.children.list(page_id).get("results", [])
 
+    # Find the [SYNCED CONTENT] marker
     marker_id = None
     for block in children:
         if block["type"] == "paragraph":
@@ -79,16 +81,14 @@ def update_page_body(page_id, full_description):
                 marker_id = block["id"]
                 break
 
-    # If no marker, create at top
+    # Create marker if it doesn't exist
     if not marker_id:
         res = notion.blocks.children.append(
             page_id,
             children=[{
                 "object": "block",
                 "type": "paragraph",
-                "paragraph": {
-                    "rich_text": [{"type": "text", "text": {"content": SYNC_CHILD_MARKER}}]
-                }
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": SYNC_CHILD_MARKER}}]}
             }]
         )
         marker_id = res["results"][0]["id"]
@@ -106,16 +106,26 @@ def update_page_body(page_id, full_description):
             if texts:
                 existing_lines.add(texts[0]["text"]["content"])
 
-    # Prepare only new lines to append
-    lines = [ln for ln in full_description.splitlines() if ln.strip() and ln not in existing_lines]
-
-    new_blocks = [
-        {
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {"rich_text": [{"type": "text", "text": {"content": ln}}]}
-        } for ln in lines
-    ]
+    # Append only new lines and split lines > MAX_LENGTH
+    new_blocks = []
+    for line in full_description.splitlines():
+        line = line.strip()
+        if not line or line in existing_lines:
+            continue
+        while len(line) > MAX_LENGTH:
+            part = line[:MAX_LENGTH]
+            new_blocks.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": part}}]}
+            })
+            line = line[MAX_LENGTH:]
+        if line:
+            new_blocks.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": line}}]}
+            })
 
     if new_blocks:
         notion.blocks.children.append(marker_id, children=new_blocks)
@@ -129,6 +139,7 @@ def upsert_notion_event(event, accurate_event):
     start_time = accurate_event.begin.isoformat()
     end_time = accurate_event.end.isoformat() if accurate_event.end else None
 
+    # Description field is just a placeholder now
     props = {
         "Assignment Title": {"title": [{"text": {"content": title}}]},
         "Class": {"select": {"name": class_name}},
@@ -150,7 +161,7 @@ def upsert_notion_event(event, accurate_event):
         new_page = notion.pages.create(parent={"database_id": DATABASE_ID}, properties=props)
         page_id = new_page["id"]
 
-        # Add synced content marker + description
+        # Add synced toggle with marker + initial description
         toggle = {
             "object": "block",
             "type": "toggle",
@@ -169,7 +180,7 @@ def upsert_notion_event(event, accurate_event):
             },
         }
         res = notion.blocks.children.append(page_id, children=[toggle])
-        toggle_id = res["results"][0]["id"]
+        toggle_id = res["results"][0]["id']
         update_page_body(toggle_id, description)
 
 def main():
